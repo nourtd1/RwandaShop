@@ -213,38 +213,38 @@ export default function UserMenu() {
   useEffect(() => {
     const supabase = createClient();
 
-    // Initial load
-    const loadUser = async () => {
-      const { data: { user: authUser } } = await supabase.auth.getUser();
-
-      if (!authUser) {
-        setUser(null);
-        setLoading(false);
-        return;
-      }
-
+    const fetchProfile = async (uid: string) => {
       const { data: profile } = await supabase
         .from("users")
         .select("id, email, full_name, phone, address, role, avatar_url, created_at, updated_at")
-        .eq("id", authUser.id)
+        .eq("id", uid)
         .single();
+      return profile
+        ? {
+            id:         profile.id,
+            email:      profile.email,
+            full_name:  profile.full_name,
+            phone:      profile.phone,
+            address:    profile.address,
+            role:       profile.role,
+            avatar_url: profile.avatar_url,
+            created_at: profile.created_at,
+            updated_at: profile.updated_at,
+          }
+        : null;
+    };
 
-      setUser(
-        profile
-          ? {
-              id:         profile.id,
-              email:      profile.email,
-              full_name:  profile.full_name,
-              phone:      profile.phone,
-              address:    profile.address,
-              role:       profile.role,
-              avatar_url: profile.avatar_url,
-              created_at: profile.created_at,
-              updated_at: profile.updated_at,
-            }
-          : null
-      );
-      setLoading(false);
+    // Initial load
+    const loadUser = async () => {
+      try {
+        const { data: { user: authUser } } = await supabase.auth.getUser();
+        if (!authUser) { setUser(null); setLoading(false); return; }
+        setUser(await fetchProfile(authUser.id));
+      } catch {
+        setUser(null);
+      } finally {
+        setLoading(false);
+      }
     };
 
     void loadUser();
@@ -252,37 +252,9 @@ export default function UserMenu() {
     // Listen for auth state changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
-        if (!session?.user) {
-          setUser(null);
-          return;
-        }
-
+        if (!session?.user || event === "SIGNED_OUT") { setUser(null); return; }
         if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED" || event === "USER_UPDATED") {
-          const { data: profile } = await supabase
-            .from("users")
-            .select("id, email, full_name, phone, address, role, avatar_url, created_at, updated_at")
-            .eq("id", session.user.id)
-            .single();
-
-          setUser(
-            profile
-              ? {
-                  id:         profile.id,
-                  email:      profile.email,
-                  full_name:  profile.full_name,
-                  phone:      profile.phone,
-                  address:    profile.address,
-                  role:       profile.role,
-                  avatar_url: profile.avatar_url,
-                  created_at: profile.created_at,
-                  updated_at: profile.updated_at,
-                }
-              : null
-          );
-        }
-
-        if (event === "SIGNED_OUT") {
-          setUser(null);
+          setUser(await fetchProfile(session.user.id));
         }
       }
     );

@@ -173,6 +173,11 @@ ALTER TABLE public.products    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.orders      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.order_items ENABLE ROW LEVEL SECURITY;
 
+-- Helper SECURITY DEFINER : lit le rôle sans déclencher le RLS (évite la récursion infinie)
+CREATE OR REPLACE FUNCTION public.get_auth_user_role()
+RETURNS TEXT LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
+AS $$ SELECT role FROM public.users WHERE id = auth.uid() $$;
+
 -- ── users ─────────────────────────────────────────────────────────
 CREATE POLICY "users_read_own"
   ON public.users FOR SELECT
@@ -183,20 +188,18 @@ CREATE POLICY "users_update_own"
   USING (auth.uid() = id)
   WITH CHECK (auth.uid() = id);
 
--- Admin : lecture de tous les profils
 CREATE POLICY "users_admin_read_all"
   ON public.users FOR SELECT
-  USING ((SELECT role FROM public.users WHERE id = auth.uid()) = 'admin');
+  USING (public.get_auth_user_role() = 'admin');
 
 -- ── categories ───────────────────────────────────────────────────
--- Tout le monde peut lire, seul l'admin peut modifier
 CREATE POLICY "categories_public_read"
   ON public.categories FOR SELECT
   USING (true);
 
 CREATE POLICY "categories_admin_write"
   ON public.categories FOR ALL
-  USING ((SELECT role FROM public.users WHERE id = auth.uid()) = 'admin');
+  USING (public.get_auth_user_role() = 'admin');
 
 -- ── products ─────────────────────────────────────────────────────
 CREATE POLICY "products_public_read"
@@ -205,19 +208,19 @@ CREATE POLICY "products_public_read"
 
 CREATE POLICY "products_admin_read_all"
   ON public.products FOR SELECT
-  USING ((SELECT role FROM public.users WHERE id = auth.uid()) = 'admin');
+  USING (public.get_auth_user_role() = 'admin');
 
 CREATE POLICY "products_admin_insert"
   ON public.products FOR INSERT
-  WITH CHECK ((SELECT role FROM public.users WHERE id = auth.uid()) = 'admin');
+  WITH CHECK (public.get_auth_user_role() = 'admin');
 
 CREATE POLICY "products_admin_update"
   ON public.products FOR UPDATE
-  USING ((SELECT role FROM public.users WHERE id = auth.uid()) = 'admin');
+  USING (public.get_auth_user_role() = 'admin');
 
 CREATE POLICY "products_admin_delete"
   ON public.products FOR DELETE
-  USING ((SELECT role FROM public.users WHERE id = auth.uid()) = 'admin');
+  USING (public.get_auth_user_role() = 'admin');
 
 -- ── orders ───────────────────────────────────────────────────────
 CREATE POLICY "orders_own_read"
@@ -226,7 +229,7 @@ CREATE POLICY "orders_own_read"
 
 CREATE POLICY "orders_admin_read_all"
   ON public.orders FOR SELECT
-  USING ((SELECT role FROM public.users WHERE id = auth.uid()) = 'admin');
+  USING (public.get_auth_user_role() = 'admin');
 
 CREATE POLICY "orders_insert_auth"
   ON public.orders FOR INSERT
@@ -234,7 +237,7 @@ CREATE POLICY "orders_insert_auth"
 
 CREATE POLICY "orders_admin_update"
   ON public.orders FOR UPDATE
-  USING ((SELECT role FROM public.users WHERE id = auth.uid()) = 'admin');
+  USING (public.get_auth_user_role() = 'admin');
 
 -- ── order_items ──────────────────────────────────────────────────
 CREATE POLICY "order_items_own_read"
@@ -248,7 +251,7 @@ CREATE POLICY "order_items_own_read"
 
 CREATE POLICY "order_items_admin_read"
   ON public.order_items FOR SELECT
-  USING ((SELECT role FROM public.users WHERE id = auth.uid()) = 'admin');
+  USING (public.get_auth_user_role() = 'admin');
 
 CREATE POLICY "order_items_insert_auth"
   ON public.order_items FOR INSERT

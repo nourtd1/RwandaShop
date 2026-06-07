@@ -2,12 +2,14 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 import type { Database } from "@/lib/supabase/types";
 
-// Routes that require an active session
 const PROTECTED_ROUTES = ["/checkout", "/order-confirmation", "/account"];
-// Admin-only routes
 const ADMIN_ROUTES     = ["/admin"];
-// Routes accessible only when NOT logged in
 const AUTH_ROUTES      = ["/login", "/register"];
+
+// Cookie that caches the admin role to avoid a DB round-trip on every /admin request.
+// It is invalidated on sign-out by deleting it, and re-verified against the DB when absent.
+const ROLE_COOKIE = "x-role-cache";
+const ROLE_COOKIE_MAX_AGE = 60 * 5; // 5 minutes
 
 export async function middleware(request: NextRequest) {
   const response = NextResponse.next({ request });
@@ -31,7 +33,6 @@ export async function middleware(request: NextRequest) {
     }
   );
 
-  // Refresh session — required for SSR to stay in sync
   const {
     data: { user },
   } = await supabase.auth.getUser();
@@ -40,31 +41,47 @@ export async function middleware(request: NextRequest) {
   const isProtectedRoute = PROTECTED_ROUTES.some((r) => pathname.startsWith(r));
   const isAuthRoute      = AUTH_ROUTES.some((r) => pathname.startsWith(r));
 
-  // Redirect unauthenticated users away from protected routes
   if ((isProtectedRoute || isAdminRoute) && !user) {
     const loginUrl = new URL("/login", request.url);
     loginUrl.searchParams.set("redirect", pathname);
     return NextResponse.redirect(loginUrl);
   }
 
-  // Admin role check — only query DB when user is logged in AND route is admin
   if (isAdminRoute && user) {
-    const { data: profile } = await supabase
-      .from("users")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const cached = request.cookies.get(ROLE_COOKIE)?.value;
 
-    // If profile doesn't exist yet or role isn't admin, redirect home
-    // Use 303 (See Other) to avoid redirect loop caching
-    if (!profile || profile.role !== "admin") {
-      return NextResponse.redirect(new URL("/", request.url), { status: 303 });
+    if (cached === "admin") {
+      // Cache hit — skip DB query
+    } else {
+      // Cache miss or stale — query DB and refresh cookie
+      const { data: profile } = await supabase
+        .from("users")
+        .select("role")
+        .eq("id", user.id)
+        .single();
+
+      if (!profile || profile.role !== "admin") {
+        response.cookies.delete(ROLE_COOKIE);
+        return NextResponse.redirect(new URL("/", request.url), { status: 303 });
+      }
+
+      response.cookies.set(ROLE_COOKIE, "admin", {
+        httpOnly: true,
+        sameSite: "lax",
+        maxAge:   ROLE_COOKIE_MAX_AGE,
+        path:     "/admin",
+      });
     }
   }
 
-  // Redirect already-logged-in users away from login/register
+  // Clear role cache on auth routes (sign-out path)
   if (isAuthRoute && user) {
     return NextResponse.redirect(new URL("/", request.url));
+  }
+
+  // Clear role cache when user signs out
+  if (!user && request.cookies.has(ROLE_COOKIE)) {
+    response.cookies.delete(ROLE_COOKIE);
   }
 
   return response;
@@ -72,17 +89,6 @@ export async function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
-    /*
-     * Match all routes EXCEPT:
-     * - _next/static  (static files)
-     * - _next/image   (image optimisation)
-     * - favicon.ico
-     * - api/health    (health check endpoint — no auth needed)
-     * - Public assets (images, fonts, manifests)
-     *
-     * This keeps the middleware lean: it only runs on actual page routes,
-     * not on every asset fetch, which was causing slowness.
-     */
     "/((?!_next/static|_next/image|favicon\\.ico|api/health|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|woff2?|ttf|otf|eot|css|js|json|map)$).*)",
   ],
 };

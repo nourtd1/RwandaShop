@@ -38,31 +38,4 @@ export async function GET(request: NextRequest) {
   });
 }
 
-export async function POST(request: NextRequest) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-
-  if (!user) {
-    return NextResponse.json({ message: "Non autorisé" }, { status: 401 });
-  }
-
-  const { data: profile } = await supabase.from("users").select("role").eq("id", user.id).single();
-  if (profile?.role !== "admin") {
-    return NextResponse.json({ message: "Accès refusé" }, { status: 403 });
-  }
-
-  const raw = await request.text();
-  const body = JSON.parse(raw) as Record<string, unknown>;
-  const insert = { ...body, artisan_id: user.id };
-  const { data, error } = await supabase
-    .from("products")
-    .insert([insert as never])
-    .select()
-    .single();
-
-  if (error) {
-    return NextResponse.json({ message: error.message }, { status: 400 });
-  }
-
-  return NextResponse.json(data, { status: 201 });
-}
+// Admin product mutations live at /api/admin/products

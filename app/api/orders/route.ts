@@ -20,7 +20,8 @@ interface CreateOrderBody {
   grand_total:      number;   // total + shipping_fee
 }
 
-// ── GET /api/orders ───────────────────────────────────────────────
+// ── GET /api/orders — customer's own orders only ──────────────────
+// Admin order listing lives at /api/admin/orders
 export async function GET(request: NextRequest) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -34,23 +35,12 @@ export async function GET(request: NextRequest) {
   const perPage = 20;
   const from    = (page - 1) * perPage;
 
-  const { data: profile } = await supabase
-    .from("users")
-    .select("role")
-    .eq("id", user.id)
-    .single();
-
-  let query = supabase
+  const { data, error, count } = await supabase
     .from("orders")
     .select("*, order_items(*, product:products(id, name, image_url))", { count: "exact" })
+    .eq("user_id", user.id)
     .order("created_at", { ascending: false })
     .range(from, from + perPage - 1);
-
-  if (profile?.role !== "admin") {
-    query = query.eq("user_id", user.id);
-  }
-
-  const { data, error, count } = await query;
 
   if (error) {
     return NextResponse.json({ message: error.message }, { status: 500 });
