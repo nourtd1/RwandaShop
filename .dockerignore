@@ -1,0 +1,92 @@
+# ══════════════════════════════════════════════════════════════════════════════
+#  RwandaShop — .dockerignore
+#
+#  Fichiers et dossiers exclus du contexte de build Docker.
+#  Règle : ne copier QUE ce qui est nécessaire à `npm run build`.
+#
+#  Impact :
+#    ✓ Build plus rapide (contexte envoyé au daemon Docker réduit)
+#    ✓ Image plus petite
+#    ✓ Aucune fuite de secrets ou de fichiers locaux dans l'image
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Dépendances ───────────────────────────────────────────────────────────────
+# Reconstruites dans le stage "deps" depuis package-lock.json
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp
+.pnp.js
+
+# ── Build Next.js ─────────────────────────────────────────────────────────────
+# Généré à l'intérieur du container par `npm run build`
+.next/
+out/
+
+# ── Secrets et variables d'environnement ─────────────────────────────────────
+# ⚠  CRITIQUE : ne jamais embarquer les clés dans l'image
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.test
+*.pem
+*.key
+*.cert
+
+# ── Versioning ────────────────────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+
+# ── CI/CD ─────────────────────────────────────────────────────────────────────
+.github/
+
+# ── Éditeurs et IDE ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.editorconfig
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+__tests__/
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+**/*.spec.tsx
+coverage/
+.nyc_output/
+
+# ── Outils qualité / config locale ────────────────────────────────────────────
+.eslintcache
+.prettierignore
+*.tsbuildinfo
+
+# ── Documentation ─────────────────────────────────────────────────────────────
+README.md
+CHANGELOG.md
+CONTRIBUTING.md
+docs/
+*.md
+!public/**/*.md
+
+# ── Supabase CLI (migrations locales — non nécessaires au runtime) ─────────────
+supabase/.branches/
+supabase/.temp/
+
+# ── Docker lui-même ───────────────────────────────────────────────────────────
+# Évite la récursion si on rebuild depuis un contexte qui contient déjà ces fichiers
+Dockerfile*
+docker-compose*.yml
+.dockerignore

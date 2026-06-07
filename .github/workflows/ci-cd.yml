@@ -1,0 +1,293 @@
+# ══════════════════════════════════════════════════════════════════════════════
+#  RwandaShop — Pipeline CI/CD GitHub Actions
+#
+#  Déclencheurs :
+#    - Push sur main ou develop  → lint + build + docker + déploiement (main)
+#    - Pull Request vers main    → lint + build uniquement (pas de déploiement)
+#
+#  Architecture des jobs :
+#
+#    ┌─────────────────────┐
+#    │   lint-and-test     │  ← tsc, eslint, build Next.js
+#    └──────────┬──────────┘
+#               │ needs
+#    ┌──────────▼──────────┐
+#    │   docker-build      │  ← build image + push ghcr.io (main uniquement)
+#    └──────────┬──────────┘
+#               │ needs
+#    ┌──────────▼──────────┐
+#    │      deploy         │  ← Vercel webhook (main uniquement)
+#    └─────────────────────┘
+#
+#  Secrets GitHub requis (Settings → Secrets and variables → Actions) :
+#    NEXT_PUBLIC_SUPABASE_URL        Clé publique Supabase (URL)
+#    NEXT_PUBLIC_SUPABASE_ANON_KEY   Clé publique Supabase (anon)
+#    VERCEL_DEPLOY_HOOK_URL          URL du webhook de déploiement Vercel
+#    GITHUB_TOKEN                    Automatiquement fourni par GitHub Actions
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: CI/CD — RwandaShop
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+
+# Annule les runs précédents sur la même branche si un nouveau commit arrive.
+# Évite de gaspiller des minutes Actions sur des runs obsolètes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ── Variables globales ────────────────────────────────────────────────────────
+env:
+  NODE_VERSION: "20"
+  # Nom de l'image Docker dans GitHub Container Registry
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  JOB 1 — lint-and-test
+#  Vérifie la qualité du code AVANT de lancer un build coûteux.
+#  Si le type-check ou le lint échoue, les jobs suivants ne s'exécutent pas.
+# ══════════════════════════════════════════════════════════════════════════════
+jobs:
+  lint-and-test:
+    name: "🔍 Lint, Type-check & Build"
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Récupère le code source ──────────────────────────────────────────
+      - name: Checkout du code source
+        uses: actions/checkout@v4
+
+      # ── Configure Node.js avec cache npm ────────────────────────────────
+      # Le cache est indexé par le hash de package-lock.json
+      # → si le lock file n'a pas changé, npm ci prend <5 s
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      # ── Installation des dépendances ─────────────────────────────────────
+      # npm ci = installation propre et déterministe depuis package-lock.json
+      # --prefer-offline utilise le cache Actions si disponible
+      - name: Installation des dépendances (npm ci)
+        run: npm ci --prefer-offline
+
+      # ── Vérification des types TypeScript ────────────────────────────────
+      # Exécute tsc --noEmit : détecte les erreurs de typage sans émettre de JS.
+      # Équivalent de : npx tsc --noEmit
+      - name: Vérification TypeScript (tsc --noEmit)
+        run: npm run type-check
+
+      # ── ESLint ────────────────────────────────────────────────────────────
+      # Analyse statique du code : erreurs de style, imports inutiles, etc.
+      # next lint = eslint configuré par Next.js avec les règles recommandées
+      - name: Lint (ESLint via next lint)
+        run: npm run lint
+
+      # ── Build de production ───────────────────────────────────────────────
+      # Construit l'application Next.js en mode production.
+      # Les variables NEXT_PUBLIC_* sont nécessaires pour compiler les bundles client.
+      # Elles sont injectées depuis les Secrets GitHub (pas de valeurs réelles dans ce fichier).
+      - name: Build Next.js (production)
+        env:
+          NEXT_PUBLIC_SUPABASE_URL:      ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_SITE_URL:          "https://rwandashop.rw"
+          # Désactive la télémétrie Vercel/Next.js pendant le build CI
+          NEXT_TELEMETRY_DISABLED:       "1"
+        run: npm run build
+
+      # ── Upload des artefacts de build ─────────────────────────────────────
+      # Conserve le résultat du build 1 jour pour debug ou réutilisation
+      # dans un job suivant si nécessaire (évite de rebuilder).
+      - name: Upload artefacts de build
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: nextjs-build-${{ github.sha }}
+          path: |
+            .next/
+            !.next/cache/
+          retention-days: 1
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  JOB 2 — docker-build
+#  Construit l'image Docker et la pousse vers GitHub Container Registry (ghcr.io).
+#  - Exécuté uniquement sur la branche main (pas sur les PRs)
+#  - Utilise Buildx pour le cache multicouche (rebuild ~3× plus rapide)
+#  - Tags : SHA du commit + "latest"
+# ══════════════════════════════════════════════════════════════════════════════
+  docker-build:
+    name: "🐳 Docker Build & Push (ghcr.io)"
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+
+    # Ne s'exécute que sur la branche main (pas sur develop, pas sur les PRs)
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    # Permission d'écriture sur le Container Registry
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout du code source
+        uses: actions/checkout@v4
+
+      # ── Docker Buildx ─────────────────────────────────────────────────────
+      # Buildx = moteur Docker étendu : multi-platform, cache GitHub Actions
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Authentification sur ghcr.io ──────────────────────────────────────
+      # GITHUB_TOKEN est automatiquement fourni par Actions — pas besoin de secret manuel
+      - name: Login sur GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Extraction des métadonnées Docker ─────────────────────────────────
+      # Génère automatiquement les tags et labels à partir du contexte Git :
+      #   - ghcr.io/org/repo:latest
+      #   - ghcr.io/org/repo:sha-abc1234
+      #   - Labels OCI (source, revision, created…)
+      - name: Extraction des métadonnées (tags et labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            # Tag "latest" uniquement sur main
+            type=raw,value=latest,enable={{is_default_branch}}
+            # Tag avec le SHA court du commit (reproductibilité)
+            type=sha,prefix=sha-,format=short
+            # Tag avec la date (ex: 2025-06-07)
+            type=raw,value={{date 'YYYY-MM-DD'}}
+
+      # ── Build et push de l'image ──────────────────────────────────────────
+      # - Cache GitHub Actions : les couches Docker sont réutilisées entre les runs
+      #   → premier build ~3 min, rebuilds ~45 s si seulement le code change
+      # - Les secrets sont injectés en ARG (pas stockés dans les couches de l'image)
+      - name: Build et push de l'image Docker
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          # Tags générés à l'étape précédente
+          tags:   ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Build args : variables NEXT_PUBLIC_* embarquées dans les bundles client
+          build-args: |
+            NEXT_PUBLIC_SUPABASE_URL=${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+            NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+            NEXT_PUBLIC_SITE_URL=https://rwandashop.rw
+          # Cache multicouche : accélère les rebuilds successifs
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+          # Provenance et SBOM : traçabilité de l'image (bonnes pratiques supply chain)
+          provenance: true
+          sbom:       false
+
+      # ── Résumé dans l'interface GitHub ───────────────────────────────────
+      - name: Résumé du build Docker
+        if: success()
+        run: |
+          echo "### Image Docker publiée 🐳" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | Valeur |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| latest | \`${{ env.IMAGE_NAME }}:latest\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| SHA    | \`${{ env.IMAGE_NAME }}:sha-$(echo ${{ github.sha }} | head -c 7)\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Commande de déploiement :**" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  JOB 3 — deploy
+#  Déclenche le déploiement en production via le webhook Vercel.
+#  - Exécuté uniquement après docker-build réussi, sur main
+#  - Vercel tire le dernier commit de main et redéploie automatiquement
+#
+#  Alternative VPS (commentée) :
+#    Si hébergement sur un VPS (DigitalOcean, OVH…), remplacer la section
+#    Vercel par les étapes SSH commentées ci-dessous.
+# ══════════════════════════════════════════════════════════════════════════════
+  deploy:
+    name: "🚀 Déploiement production (Vercel)"
+    runs-on: ubuntu-latest
+    needs: docker-build
+
+    # Uniquement sur main après un push (pas sur les PRs)
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    # Environnement GitHub : permet de voir les déploiements dans l'onglet Deployments
+    environment:
+      name: production
+      url:  https://rwandashop.rw
+
+    steps:
+      - name: Checkout du code source
+        uses: actions/checkout@v4
+
+      # ── Option A : Déploiement Vercel via Deploy Hook ─────────────────────
+      # Vercel reçoit un appel HTTP → récupère le code → redéploie.
+      # Le webhook est créé dans : Vercel Dashboard → Project → Settings → Git → Deploy Hooks
+      # Stocker l'URL dans : GitHub → Settings → Secrets → VERCEL_DEPLOY_HOOK_URL
+      - name: Déclenchement du déploiement Vercel
+        run: |
+          RESPONSE=$(curl -sf -X POST "${{ secrets.VERCEL_DEPLOY_HOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '{"ref": "main"}')
+          echo "Réponse Vercel : $RESPONSE"
+
+      # ── Option B : Déploiement VPS via SSH (décommentez si besoin) ─────────
+      # Prérequis :
+      #   - Secret VPS_SSH_KEY    : clé privée SSH (cat ~/.ssh/id_rsa | base64)
+      #   - Secret VPS_HOST       : IP ou hostname du VPS
+      #   - Secret VPS_USER       : utilisateur SSH (ex: deploy)
+      #   - Docker installé sur le VPS + authentifié sur ghcr.io
+      #
+      # - name: Déploiement sur VPS via SSH
+      #   uses: appleboy/ssh-action@v1
+      #   with:
+      #     host:     ${{ secrets.VPS_HOST }}
+      #     username: ${{ secrets.VPS_USER }}
+      #     key:      ${{ secrets.VPS_SSH_KEY }}
+      #     script: |
+      #       # Authentification sur ghcr.io depuis le VPS
+      #       echo ${{ secrets.GITHUB_TOKEN }} | \
+      #         docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      #
+      #       # Tire la nouvelle image
+      #       docker pull ghcr.io/${{ github.repository }}:latest
+      #
+      #       # Redémarre les services avec la nouvelle image
+      #       cd /opt/rwandashop
+      #       docker-compose pull app
+      #       docker-compose up -d --no-deps app
+      #
+      #       # Nettoyage des anciennes images (libère l'espace disque)
+      #       docker image prune -f
+
+      # ── Résumé du déploiement ─────────────────────────────────────────────
+      - name: Résumé du déploiement
+        if: success()
+        run: |
+          echo "### Déploiement lancé 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environnement** : production" >> $GITHUB_STEP_SUMMARY
+          echo "- **URL** : https://rwandashop.rw" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit** : \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Auteur** : @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Message** : ${{ github.event.head_commit.message }}" >> $GITHUB_STEP_SUMMARY

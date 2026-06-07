@@ -1,0 +1,165 @@
+# ══════════════════════════════════════════════════════════════════════════════
+#  RwandaShop — Docker Compose
+#
+#  Usage :
+#    Démarrer tous les services :  docker-compose up -d
+#    Voir les logs :               docker-compose logs -f app
+#    Arrêter :                     docker-compose down
+#    Arrêter + supprimer volumes : docker-compose down -v
+#
+#  Services :
+#    app  → Application Next.js (port 3000)
+#    db   → PostgreSQL 15 pour développement local (port 5432)
+#           ⚠  En production, utiliser Supabase Cloud — pas ce service.
+#
+#  Variables d'environnement :
+#    Copier .env.local.example → .env
+#    docker-compose lit automatiquement le fichier .env à la racine.
+# ══════════════════════════════════════════════════════════════════════════════
+
+services:
+
+  # ── Service 1 : Application Next.js ──────────────────────────────────────────
+  app:
+    # Construit l'image depuis le Dockerfile local (stage "runner")
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+      # Les variables NEXT_PUBLIC_* doivent être connues au BUILD de l'image
+      # (elles sont embarquées dans les bundles JS côté client)
+      args:
+        NEXT_PUBLIC_SUPABASE_URL:             ${NEXT_PUBLIC_SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY:        ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+        NEXT_PUBLIC_SITE_URL:                 ${NEXT_PUBLIC_SITE_URL:-https://rwandashop.rw}
+        NEXT_PUBLIC_APP_NAME:                 ${NEXT_PUBLIC_APP_NAME:-RwandaShop}
+        NEXT_PUBLIC_FREE_SHIPPING_THRESHOLD:  ${NEXT_PUBLIC_FREE_SHIPPING_THRESHOLD:-20000}
+        NEXT_PUBLIC_SHIPPING_FEE:             ${NEXT_PUBLIC_SHIPPING_FEE:-2000}
+        NEXT_PUBLIC_STORAGE_BUCKET_PRODUCTS:  ${NEXT_PUBLIC_STORAGE_BUCKET_PRODUCTS:-products}
+        NEXT_PUBLIC_STORAGE_BUCKET_AVATARS:   ${NEXT_PUBLIC_STORAGE_BUCKET_AVATARS:-avatars}
+        NEXT_PUBLIC_AUTH_REDIRECT_URL:        ${NEXT_PUBLIC_AUTH_REDIRECT_URL}
+
+    image: rwandashop:local
+
+    container_name: rwandashop_app
+
+    # Mappage de port : hôte:container
+    # Accès via http://localhost:3000
+    ports:
+      - "3000:3000"
+
+    # Variables d'environnement injectées au RUNTIME (pas dans l'image)
+    # Les clés privées n'apparaissent jamais dans les couches de l'image.
+    environment:
+      NODE_ENV:                 production
+      PORT:                     3000
+      HOSTNAME:                 "0.0.0.0"
+      # Clés privées Supabase — injectées ici uniquement
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      SUPABASE_JWT_SECRET:       ${SUPABASE_JWT_SECRET}
+      # SEO
+      NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION: ${NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION:-}
+
+    # Lit les variables depuis le fichier .env (créé depuis .env.local.example)
+    env_file:
+      - .env
+
+    # Le container app attend que db soit "healthy" avant de démarrer
+    # (utile uniquement si on utilise le service db local)
+    depends_on:
+      db:
+        condition: service_healthy
+
+    # Health check : interroge l'endpoint /api/health toutes les 30 secondes.
+    # start_period : délai avant le premier check (Next.js démarre en ~5–10 s)
+    # retries : 3 échecs consécutifs → container "unhealthy"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval:     30s
+      timeout:       5s
+      start_period: 15s
+      retries:       3
+
+    # Redémarre automatiquement sauf si arrêté manuellement
+    restart: unless-stopped
+
+    # Rattache au réseau interne de l'application
+    networks:
+      - rwandashop_net
+
+    # Limite les ressources pour éviter qu'un bug ne sature l'hôte
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus:   "1.0"
+        reservations:
+          memory: 128M
+
+  # ── Service 2 : PostgreSQL (développement local uniquement) ──────────────────
+  # ⚠  NE PAS utiliser en production — utiliser Supabase Cloud à la place.
+  # Ce service est utile pour tester les migrations SQL localement avec la CLI Supabase.
+  db:
+    image: postgres:15-alpine
+
+    container_name: rwandashop_db
+
+    # Expose le port pour se connecter depuis un client SQL (ex: TablePlus, psql)
+    # Format : hôte:container — seulement sur l'interface loopback (127.0.0.1)
+    # pour éviter d'exposer la base sur le réseau local.
+    ports:
+      - "127.0.0.1:5432:5432"
+
+    environment:
+      # Credentials de la base de données locale (pas de production)
+      POSTGRES_USER:     ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB:       ${POSTGRES_DB:-rwandashop}
+      # Améliore les performances en désactivant fsync pour le dev local
+      POSTGRES_HOST_AUTH_METHOD: trust
+
+    # Volume nommé : les données persistent entre les redémarrages du container.
+    # `docker-compose down` ne supprime PAS ce volume.
+    # `docker-compose down -v` le supprime.
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Script SQL d'initialisation (exécuté une seule fois à la création du volume)
+      - ./supabase/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+
+    healthcheck:
+      # pg_isready vérifie que PostgreSQL accepte les connexions
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-rwandashop}"]
+      interval:     10s
+      timeout:       5s
+      start_period: 10s
+      retries:       5
+
+    restart: unless-stopped
+
+    networks:
+      - rwandashop_net
+
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus:   "0.5"
+
+# ── Volumes nommés ────────────────────────────────────────────────────────────
+# Les volumes nommés sont gérés par Docker — persistants entre les sessions.
+volumes:
+  postgres_data:
+    driver: local
+    # Métadonnées pour la documentation
+    labels:
+      project: "rwandashop"
+      environment: "development"
+
+# ── Réseaux ───────────────────────────────────────────────────────────────────
+# Réseau bridge isolé — les containers ne sont pas exposés au réseau hôte
+# sauf via les ports explicitement mappés.
+networks:
+  rwandashop_net:
+    driver: bridge
+    labels:
+      project: "rwandashop"
