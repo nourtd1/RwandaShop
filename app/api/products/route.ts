@@ -51,9 +51,12 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ message: "Accès refusé" }, { status: 403 });
   }
 
-  const body = await request.json() as Record<string, unknown>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await supabase.from("products").insert([{ ...body, artisan_id: user.id } as any]).select().single();
+  const body = (await request.json()) as Record<string, unknown>;
+  const { data, error } = await supabase
+    .from("products")
+    .insert([{ ...body, artisan_id: user.id }] as Parameters<ReturnType<typeof supabase.from>["insert"]>[0])
+    .select()
+    .single();
 
   if (error) {
     return NextResponse.json({ message: error.message }, { status: 400 });
